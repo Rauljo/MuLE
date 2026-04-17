@@ -1,0 +1,90 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+code: ..
+command: |
+  set -euo pipefail
+  python -m pip install -U pip
+  python -m pip install peft transformers accelerate safetensors vllm datasets "math-verify==0.7.0" langdetect jsonlines numpy tqdm
+
+  export VLLM_ATTENTION_BACKEND=FLASH_ATTN
+  export VLLM_USE_FLASHINFER_SAMPLER=0
+  export VLLM_DISABLE_FLASHINFER_PREFILL=1
+
+  export ADAPTER_DIR="${{inputs.adapter_dir}}"
+  export MERGED_DIR="$PWD/azure_work/merged_model_1e06"
+  export MODEL_NAME="azure-1e06"
+
+  python - <<'PY'
+  import os, torch
+  from transformers import AutoModelForCausalLM, AutoTokenizer
+  from peft import PeftModel
+  base = "XueZhang-bjtu/1.5B-cold-start-SFT"
+  adapter = os.environ["ADAPTER_DIR"]
+  out = os.environ["MERGED_DIR"]
+  tok = AutoTokenizer.from_pretrained(base, trust_remote_code=True)
+  m = AutoModelForCausalLM.from_pretrained(base, torch_dtype=torch.float16, device_map="auto", trust_remote_code=True)
+  m = PeftModel.from_pretrained(m, adapter)
+  m = m.merge_and_unload()
+  m.save_pretrained(out)
+  tok.save_pretrained(out)
+  print("saved:", out)
+  PY
+
+  python eval_tools/MMATH/mmath_eval.py \
+    --model_path "$MERGED_DIR" \
+    --model_name "$MODEL_NAME" \
+    --temp 0.9 \
+    --input_jsonl "${{inputs.val_mmath}}" \
+    --gpu_memory_utilization 0.75 \
+    --max_model_len 16384 \
+    --max_tokens 14336 \
+    --num_samples 4 \
+    --top_p 0.95 \
+    --enforce_eager \
+    --log_lang_timing
+
+  python eval_tools/MMATH/cal-MMATH-acc.py \
+    --res_path "logs-eval/MMATH-temp_0.9/$MODEL_NAME" \
+    --num_samples 4 \
+    --tokenizer_path "$MERGED_DIR" | tee "${{outputs.eval_output}}/mmath_metrics.txt"
+
+  for lvl in low medium high top; do
+    for lang in ko ja pt th en zh ar es fr vi; do
+      python eval_tools/PolyMath/polymath_res_gen.py \
+        --model_path "$MERGED_DIR" \
+        --model_name "$MODEL_NAME" \
+        --temp 0.9 \
+        --input_jsonl "${{inputs.val_polymath}}" \
+        --lang "$lang" \
+        --level "$lvl" \
+        --gpu_memory_utilization 0.75 \
+        --max_model_len 16384 \
+        --max_tokens 14336 \
+        --num_samples 4 \
+        --top_p 0.95 \
+        --enforce_eager
+    done
+  done
+
+  bash eval_tools/PolyMath/eval/run_eval.sh "$MODEL_NAME"
+  python eval_tools/PolyMath/cal-polymath-acc.py --model_name "$MODEL_NAME" | tee "${{outputs.eval_output}}/polymath_metrics.txt"
+
+  cp -r logs-eval "${{outputs.eval_output}}/logs-eval"
+
+inputs:
+  adapter_dir:
+    type: uri_folder
+    path: azureml:adapter_1e06:1
+  val_mmath:
+    type: uri_file
+    path: azureml:val_set_mmath:1
+  val_polymath:
+    type: uri_file
+    path: azureml:val_set_polymath:1
+
+outputs:
+  eval_output:
+    type: uri_folder
+    mode: rw_mount
+
+environment: azureml://registries/azureml/environments/acpt-pytorch-2.2-cuda12.1/labels/latest
+compute: azureml:A100-gpu-cluster

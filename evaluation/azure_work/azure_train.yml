@@ -1,0 +1,24 @@
+command: >-
+  python dpo_train_final.py 
+  --dataset_file ${{inputs.precomputed_data}} 
+  --stats_file ${{inputs.metadata_folder}}/stats.json
+  --output_dir ${{outputs.model_output}}
+  --learning_rate 5e-7
+  --beta 0.1
+environment_variables:
+  WANDB_API_KEY: "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"
+inputs:
+  precomputed_data:
+    type: uri_folder
+    path: azureml://datastores/workspaceblobstore/paths/azureml/dynamic_boot_w4t9nm8bn9/precomputed_folder
+    #path: azureml://datastores/workspaceblobstore/paths/azureml/<JOB_NAME>/precomputed_folder
+  metadata_folder:
+    type: uri_folder
+    path: azureml:dpo_dataset:1  # Reuse the same folder to get stats.json
+outputs:
+  model_output:
+    type: uri_folder
+    mode: rw_mount
+code: .
+environment: azureml://registries/azureml/environments/acpt-pytorch-2.2-cuda12.1/labels/latest
+compute: azureml:A100-gpu-cluster

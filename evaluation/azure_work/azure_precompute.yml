@@ -1,0 +1,16 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+command: >-
+  python precompute_ref.py 
+  --input_file ${{inputs.raw_data}}/dpo_dataset.jsonl
+  --output_dir ${{outputs.precomputed_folder}}
+inputs:
+  raw_data:
+    type: uri_folder 
+    path: azureml:dpo_dataset:1
+outputs:
+  precomputed_folder:
+    type: uri_folder
+    mode: upload  # This saves the files back to Azure storage
+code: .
+environment: azureml://registries/azureml/environments/acpt-pytorch-2.2-cuda12.1/labels/latest
+compute: azureml:A100-gpu-cluster
