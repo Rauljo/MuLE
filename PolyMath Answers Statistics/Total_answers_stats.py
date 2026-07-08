@@ -91,10 +91,11 @@ def main():
         Acc_Pct=('Accuracy', lambda x: x.mean() * 100),
         Format_Pct=('Format', lambda x: x.mean() * 100),
         Avg_LC=('LC Score', 'mean'),
+        Avg_Mix_Pct=('Mix Fraction', lambda x: x.mean() * 100),
         Avg_BTs=('Backtracks', 'mean'),
         Avg_Len=('Length', 'mean')
     ).reset_index()
-    format_mapping = {'Acc_Pct': '{:.1f}%', 'Format_Pct': '{:.1f}%', 'Avg_LC': '{:.2f}', 'Avg_BTs': '{:.2f}', 'Avg_Len': '{:.0f}'}
+    format_mapping = {'Acc_Pct': '{:.1f}%', 'Format_Pct': '{:.1f}%', 'Avg_LC': '{:.2f}', 'Avg_Mix_Pct': '{:.1f}%', 'Avg_BTs': '{:.2f}', 'Avg_Len': '{:.0f}'}
     for col, fmt in format_mapping.items():
         level_summary[col] = level_summary[col].map(fmt.format)
     print(level_summary.to_string(index=False))
@@ -108,6 +109,7 @@ def main():
         Acc_Pct=('Accuracy', lambda x: x.mean() * 100),
         Format_Pct=('Format', lambda x: x.mean() * 100),
         Avg_LC=('LC Score', 'mean'),
+        Avg_Mix_Pct=('Mix Fraction', lambda x: x.mean() * 100),
         Avg_BTs=('Backtracks', 'mean'),
         Avg_Len=('Length', 'mean')
     ).reset_index()
@@ -123,10 +125,11 @@ def main():
         Total_Ans=('Accuracy', 'count'),
         Format_Pct=('Format', lambda x: x.mean() * 100),
         Avg_LC=('LC Score', 'mean'),
+        Avg_Mix_Pct=('Mix Fraction', lambda x: x.mean() * 100),
         Avg_BTs=('Backtracks', 'mean'),
         Avg_Len=('Length', 'mean')
     ).reset_index()
-    format_mapping_acc = {'Format_Pct': '{:.1f}%', 'Avg_LC': '{:.2f}', 'Avg_BTs': '{:.2f}', 'Avg_Len': '{:.0f}'}
+    format_mapping_acc = {'Format_Pct': '{:.1f}%', 'Avg_LC': '{:.2f}', 'Avg_Mix_Pct': '{:.1f}%', 'Avg_BTs': '{:.2f}', 'Avg_Len': '{:.0f}'}
     for col, fmt in format_mapping_acc.items():
         level_acc_summary[col] = level_acc_summary[col].map(fmt.format)
     print(level_acc_summary.to_string(index=False))
@@ -173,6 +176,44 @@ def main():
     plt.grid(axis='y', linestyle='--', alpha=0.5)
     plt.legend(title="Accuracy Status", loc="lower right", framealpha=0.9)
     plt.savefig("./Plots/language_consistency_by_level_boxplot.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # 2b. Language Mix Fraction Boxplot (windowed fastText detector)
+    print("Generating Boxplot/Stripplot for Language Mix Fraction...")
+    plt.figure(figsize=(10, 7))
+    df["Mix Percentage"] = df["Mix Fraction"] * 100
+    sns.boxplot(
+        data=df, x="Level", y="Mix Percentage", hue="Accuracy Label",
+        palette=palette, showmeans=True,
+        meanprops={"marker": "o", "markerfacecolor": "white", "markeredgecolor": "black"},
+        fliersize=0, boxprops={"alpha": 0.7}
+    )
+    sns.stripplot(
+        data=df, x="Level", y="Mix Percentage", hue="Accuracy Label",
+        palette=strip_palette, dodge=True, jitter=0.25, alpha=0.4, linewidth=0, size=4, legend=False
+    )
+    plt.title("Language Mix (% of Windows Off-Language) by Difficulty Level and Accuracy", fontsize=15, pad=15)
+    plt.xlabel("Difficulty Level", fontsize=12)
+    plt.ylabel("% of Sliding Windows Off Expected Language", fontsize=12)
+    plt.ylim(-5, 105)
+    plt.grid(axis='y', linestyle='--', alpha=0.5)
+    plt.legend(title="Accuracy Status", loc="upper right", framealpha=0.9)
+    plt.savefig("./Plots/language_mix_by_level_boxplot.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # 2c. Language Mix Fraction by Level and Language (bar plot)
+    print("Generating Bar Plot for Language Mix by Level and Language...")
+    plt.figure(figsize=(10, 7))
+    mix_by_level_lang = df.groupby(['Level', 'Language'], observed=True)['Mix Fraction'].mean().reset_index()
+    mix_by_level_lang['Mix Fraction'] *= 100
+    sns.barplot(data=mix_by_level_lang, x="Level", y="Mix Fraction", hue="Language", palette="Set2", edgecolor="black")
+    plt.title("Language Mix (% of Windows Off-Language) by Level and Language", fontsize=15, pad=15)
+    plt.xlabel("Difficulty Level", fontsize=12)
+    plt.ylabel("% of Sliding Windows Off Expected Language", fontsize=12)
+    plt.ylim(0, max(5, mix_by_level_lang['Mix Fraction'].max() * 1.2))
+    plt.grid(axis='y', linestyle='--', alpha=0.5)
+    plt.legend(title="Language")
+    plt.savefig("./Plots/language_mix_by_level_lang_barplot.png", dpi=300, bbox_inches="tight")
     plt.close()
 
     # 3. Backtracks Plot

@@ -22,6 +22,28 @@ LEVELS = ["low", "medium", "high", "top"]
 LANGS = ["en", "es", "fr", "pt"]
 NUM_SAMPLES = 4
 
+# --- Windowed language-mix detection (adapted from dataset_filter.py) ---
+# Instead of one language guess for the whole text, this slides a window across it and
+# scores each window separately with fastText, so we can see WHERE/HOW MUCH a response
+# drifts into another language (e.g. a Spanish answer that switches to English mid-way),
+# not just a single overall pass/fail guess.
+FASTTEXT_MODEL_PATH = "../evaluation/eval_tools/langid/lid.176.ftz"
+WINDOW_SIZE = 350        # chars per detection window (fastText LID is reliable at this size)
+WINDOW_STRIDE = 175      # overlap so a genuine language switch always spans >=2 windows
+WINDOW_CONF_THRESHOLD = 0.8  # renormalized confidence below this -> window is ambiguous
+
+try:
+    import fasttext
+    _fasttext_lid = fasttext.load_model(
+        os.path.join(os.path.dirname(__file__), FASTTEXT_MODEL_PATH)
+    )
+    FASTTEXT_AVAILABLE = True
+except Exception as _fasttext_exc:
+    _fasttext_lid = None
+    FASTTEXT_AVAILABLE = False
+    print(f"Warning: fastText LID model not available ({_fasttext_exc}); "
+          f"language-mix stats will report 0 for every sample.")
+
 # All model result directories live under here, one subfolder per --model_name
 # (e.g. "1.5B-cold-start-SFT", "MTHINKER", "MULE" — matches whatever --model_name
 # was passed to polymath_res_gen.py during generation).
@@ -201,14 +223,100 @@ def language_consistency_score(text, expected_lang):
         return 0.0
 
 
+def _strip_for_lid(text):
+    """Same cleanup as language_consistency_score, factored out for reuse."""
+    cleaned = re.sub(r'\\boxed\{[^}]*\}', '', text)
+    cleaned = re.sub(r'\$[^$]*\$', '', cleaned)
+    cleaned = re.sub(r'\\[a-zA-Z]+\{[^}]*\}', '', cleaned)
+    cleaned = re.sub(r'<think>|</think>', '', cleaned)
+    return re.sub(r'\s+', ' ', cleaned).strip()
+
+
+def _windows(text, window_size=WINDOW_SIZE, stride=WINDOW_STRIDE):
+    if len(text) <= window_size:
+        return [text]
+    return [text[i:i + window_size]
+            for i in range(0, len(text) - window_size + stride, stride)]
+
+
+def _classify_window(window, candidate_langs, conf_threshold=WINDOW_CONF_THRESHOLD):
+    """Language code for the window, or None when fastText isn't confident.
+
+    Mirrors dataset_filter.py's _classify_window: the absolute top-1 label is checked
+    BEFORE renormalizing over the candidate set, so a window confidently in a
+    non-candidate language (e.g. Chinese leakage) is reported as that off-candidate
+    code, instead of having its probability mass reassigned to whichever candidate
+    language happened to also appear in the top-20.
+    """
+    labels, probs = _fasttext_lid.predict(window, k=20)
+    top_code = labels[0].replace("__label__", "")
+    if top_code not in candidate_langs:
+        return top_code if probs[0] >= conf_threshold else None
+    cand = {}
+    for label, prob in zip(labels, probs):
+        code = label.replace("__label__", "")
+        if code in candidate_langs:
+            cand[code] = prob
+    total = sum(cand.values())
+    if total <= 0:
+        return None
+    best = max(cand, key=cand.get)
+    if cand[best] / total < conf_threshold:
+        return None
+    return best
+
+
+def language_mix_stats(text, expected_lang, candidate_langs=None):
+    """Sliding-window language-mix measurement (adapted from dataset_filter.py).
+
+    Unlike language_consistency_score's single guess for the whole text, this scores
+    each overlapping window separately, so it can tell you HOW MUCH of a response
+    drifted into another language, not just whether the overall guess matched.
+
+    Returns a dict:
+        num_windows       -- windows scored (1 if the text was too short to split)
+        windows_off_lang  -- windows confidently in a language other than expected_lang
+        mix_fraction      -- windows_off_lang / num_windows, in [0.0, 1.0]; 0 = fully
+                             consistent, higher = more of the text drifted off-language
+        off_langs         -- {lang_code: window_count} for whatever leaked in
+    """
+    empty = {"num_windows": 0, "windows_off_lang": 0, "mix_fraction": 0.0, "off_langs": {}}
+    if not FASTTEXT_AVAILABLE:
+        return empty
+
+    candidate_langs = candidate_langs or tuple(LANGS)
+    cleaned = _strip_for_lid(text)
+    if len(cleaned) < 40:
+        # too short to judge - mirrors language_consistency_score's benefit-of-the-doubt
+        return {"num_windows": 1, "windows_off_lang": 0, "mix_fraction": 0.0, "off_langs": {}}
+
+    labels = [_classify_window(w, candidate_langs) for w in _windows(cleaned)]
+    n = len(labels)
+
+    off_langs = {}
+    for lab in labels:
+        if lab is not None and lab != expected_lang:
+            off_langs[lab] = off_langs.get(lab, 0) + 1
+    windows_off = sum(off_langs.values())
+
+    return {
+        "num_windows": n,
+        "windows_off_lang": windows_off,
+        "mix_fraction": windows_off / n if n else 0.0,
+        "off_langs": off_langs,
+    }
+
+
 def load_records(results_dir=None, levels=None, langs=None, num_samples=None, tokenizer=None):
     """Loads PolyMath generation JSONs (polymath_res_gen.py output) into per-sample records.
 
     Expects files at f"{results_dir}/{level}/{lang}.json", each a list of items with
     "answer" (ground truth) and "thinking_pred_i"/"answer_pred_i" for i in range(num_samples).
 
-    Returns a list of dicts: Level, Language, Question ID, Accuracy, LC Score, Backtracks,
-    Length, Format, Question Correct Count (samples correct out of num_samples for that question).
+    Returns a list of dicts: Level, Language, Question ID, Accuracy, LC Score, Mix Fraction
+    (windowed language-mix, see language_mix_stats), Windows Off Lang, Num Windows,
+    Backtracks, Length, Format, Question Correct Count (samples correct out of num_samples
+    for that question).
     """
     # Resolved lazily (rather than as default-arg values) so overriding the module-level
     # constants above after import still takes effect.
@@ -252,12 +360,16 @@ def load_records(results_dir=None, levels=None, langs=None, num_samples=None, to
                 correct_count = sum(1 for _, acc in samples if acc == 1.0)
 
                 for full_text, acc in samples:
+                    mix_stats = language_mix_stats(full_text, lang)
                     records.append({
                         "Level": level,
                         "Language": lang,
                         "Question ID": str(item.get("id", "")),
                         "Accuracy": acc,
                         "LC Score": language_consistency_score(full_text, lang),
+                        "Mix Fraction": mix_stats["mix_fraction"],
+                        "Windows Off Lang": mix_stats["windows_off_lang"],
+                        "Num Windows": mix_stats["num_windows"],
                         "Backtracks": len(BACKTRACK_SIGNALS.findall(full_text)),
                         "Length": len(tokenizer.encode(full_text)) if tokenizer is not None else None,
                         "Format": format_reward(full_text),
